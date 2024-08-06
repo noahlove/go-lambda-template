@@ -1,0 +1,10 @@
+aws:
+  region: us-west-2
+  profile: personal
+
+lambda:
+  function_name: hello-world-lambda
+  role_name: lambda-execution-role
+
+ecr:
+  repository_name: hello-world-repo

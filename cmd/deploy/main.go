@@ -7,16 +7,30 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"gopkg.in/yaml.v2"
 )
 
-const (
-	region        = "us-west-2"
-	functionName  = "hello-world-lambda"
-	ecrRepository = "hello-world-repo"
-	awsProfile    = "personal"
-)
+type Config struct {
+	AWS struct {
+		Region  string `yaml:"region"`
+		Profile string `yaml:"profile"`
+	} `yaml:"aws"`
+	Lambda struct {
+		FunctionName string `yaml:"function_name"`
+	} `yaml:"lambda"`
+	ECR struct {
+		RepositoryName string `yaml:"repository_name"`
+	} `yaml:"ecr"`
+}
+
+var config Config
 
 func main() {
+	if err := loadConfig("config.yaml"); err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
+
 	if err := checkIAMPermissions(); err != nil {
 		log.Fatalf("IAM permission check failed: %v", err)
 	}
@@ -49,8 +63,22 @@ func main() {
 	fmt.Println("Deployment completed successfully")
 }
 
+func loadConfig(filename string) error {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("error reading config file: %v", err)
+	}
+
+	err = yaml.Unmarshal(data, &config)
+	if err != nil {
+		return fmt.Errorf("error parsing config file: %v", err)
+	}
+
+	return nil
+}
+
 func checkIAMPermissions() error {
-	cmd := exec.Command("aws", "iam", "get-user", "--profile", awsProfile)
+	cmd := exec.Command("aws", "iam", "get-user", "--profile", config.AWS.Profile)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to get IAM user info: %v\nOutput: %s", err, output)
@@ -60,7 +88,7 @@ func checkIAMPermissions() error {
 }
 
 func getAWSAccountID() (string, error) {
-	cmd := exec.Command("aws", "sts", "get-caller-identity", "--query", "Account", "--output", "json", "--profile", awsProfile)
+	cmd := exec.Command("aws", "sts", "get-caller-identity", "--query", "Account", "--output", "json", "--profile", config.AWS.Profile)
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to get AWS Account ID: %v", err)
@@ -75,7 +103,7 @@ func getAWSAccountID() (string, error) {
 }
 
 func buildDockerImage() error {
-	cmd := exec.Command("docker", "build", "-t", fmt.Sprintf("%s/%s", ecrRepository, functionName), ".")
+	cmd := exec.Command("docker", "build", "-t", fmt.Sprintf("%s/%s", config.ECR.RepositoryName, config.Lambda.FunctionName), ".")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -86,13 +114,13 @@ func buildDockerImage() error {
 }
 
 func authenticateDocker(awsAccountID string) error {
-	cmd := exec.Command("aws", "ecr", "get-login-password", "--region", region, "--profile", awsProfile)
+	cmd := exec.Command("aws", "ecr", "get-login-password", "--region", config.AWS.Region, "--profile", config.AWS.Profile)
 	password, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("failed to get ECR login password: %v", err)
 	}
 
-	ecrURL := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com", awsAccountID, region)
+	ecrURL := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com", awsAccountID, config.AWS.Region)
 	loginCmd := exec.Command("docker", "login", "--username", "AWS", "--password-stdin", ecrURL)
 	loginCmd.Stdin = strings.NewReader(string(password))
 	loginCmd.Stdout = os.Stdout
@@ -106,8 +134,8 @@ func authenticateDocker(awsAccountID string) error {
 
 func tagDockerImage(awsAccountID string) error {
 	cmd := exec.Command("docker", "tag",
-		fmt.Sprintf("%s/%s:latest", ecrRepository, functionName),
-		fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s:latest", awsAccountID, region, ecrRepository))
+		fmt.Sprintf("%s/%s:latest", config.ECR.RepositoryName, config.Lambda.FunctionName),
+		fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s:latest", awsAccountID, config.AWS.Region, config.ECR.RepositoryName))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -119,7 +147,7 @@ func tagDockerImage(awsAccountID string) error {
 
 func pushDockerImage(awsAccountID string) error {
 	cmd := exec.Command("docker", "push",
-		fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s:latest", awsAccountID, region, ecrRepository))
+		fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s:latest", awsAccountID, config.AWS.Region, config.ECR.RepositoryName))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -130,12 +158,12 @@ func pushDockerImage(awsAccountID string) error {
 }
 
 func updateLambdaFunction(awsAccountID string) error {
-	imageUri := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s:latest", awsAccountID, region, ecrRepository)
+	imageUri := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s:latest", awsAccountID, config.AWS.Region, config.ECR.RepositoryName)
 	updateCodeCmd := exec.Command("aws", "lambda", "update-function-code",
-		"--function-name", functionName,
+		"--function-name", config.Lambda.FunctionName,
 		"--image-uri", imageUri,
-		"--profile", awsProfile,
-		"--region", region)
+		"--profile", config.AWS.Profile,
+		"--region", config.AWS.Region)
 
 	output, err := updateCodeCmd.CombinedOutput()
 	if err != nil {

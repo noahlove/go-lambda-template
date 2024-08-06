@@ -7,17 +7,32 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"gopkg.in/yaml.v2"
 )
 
-const (
-	region        = "us-west-2"
-	functionName  = "hello-world-lambda"
-	ecrRepository = "hello-world-repo"
-	roleName      = "lambda-execution-role"
-	awsProfile    = "personal"
-)
+type Config struct {
+	AWS struct {
+		Region  string `yaml:"region"`
+		Profile string `yaml:"profile"`
+	} `yaml:"aws"`
+	Lambda struct {
+		FunctionName string `yaml:"function_name"`
+		RoleName     string `yaml:"role_name"`
+	} `yaml:"lambda"`
+	ECR struct {
+		RepositoryName string `yaml:"repository_name"`
+	} `yaml:"ecr"`
+}
+
+var config Config
 
 func main() {
+	// Load configuration
+	if err := loadConfig("config.yaml"); err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
+
 	// Check if LAMBDA_EXECUTION_ROLE_ARN exists
 	roleARN := os.Getenv("LAMBDA_EXECUTION_ROLE_ARN")
 	if roleARN == "" {
@@ -42,6 +57,11 @@ func main() {
 		log.Fatalf("Error getting AWS Account ID: %v", err)
 	}
 
+	// Build and push Docker image
+	if err := buildAndPushDockerImage(awsAccountID); err != nil {
+		log.Fatalf("Error building and pushing Docker image: %v", err)
+	}
+
 	// Create Lambda function with a container image
 	if err := createLambdaFunction(roleARN, awsAccountID); err != nil {
 		log.Printf("Error creating Lambda function: %v", err)
@@ -50,11 +70,25 @@ func main() {
 	}
 }
 
+func loadConfig(filename string) error {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("error reading config file: %v", err)
+	}
+
+	err = yaml.Unmarshal(data, &config)
+	if err != nil {
+		return fmt.Errorf("error parsing config file: %v", err)
+	}
+
+	return nil
+}
+
 func getOrCreateLambdaExecutionRole() (string, error) {
 	// Try to get the role first
 	getRoleCmd := exec.Command("aws", "iam", "get-role",
-		"--role-name", roleName,
-		"--profile", "personal")
+		"--role-name", config.Lambda.RoleName,
+		"--profile", config.AWS.Profile)
 
 	output, err := getRoleCmd.CombinedOutput()
 	if err == nil {
@@ -72,9 +106,9 @@ func getOrCreateLambdaExecutionRole() (string, error) {
 
 	// If the role doesn't exist, create it
 	createRoleCmd := exec.Command("aws", "iam", "create-role",
-		"--role-name", roleName,
+		"--role-name", config.Lambda.RoleName,
 		"--assume-role-policy-document", `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}`,
-		"--profile", "personal")
+		"--profile", config.AWS.Profile)
 
 	output, err = createRoleCmd.CombinedOutput()
 	if err != nil {
@@ -92,9 +126,9 @@ func getOrCreateLambdaExecutionRole() (string, error) {
 
 	// Attach AWSLambdaBasicExecutionRole policy
 	attachPolicyCmd := exec.Command("aws", "iam", "attach-role-policy",
-		"--role-name", roleName,
+		"--role-name", config.Lambda.RoleName,
 		"--policy-arn", "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
-		"--profile", "personal")
+		"--profile", config.AWS.Profile)
 
 	output, err = attachPolicyCmd.CombinedOutput()
 	if err != nil {
@@ -107,9 +141,9 @@ func getOrCreateLambdaExecutionRole() (string, error) {
 
 func createECRRepository() error {
 	createECRCmd := exec.Command("aws", "ecr", "create-repository",
-		"--repository-name", ecrRepository,
-		"--profile", "personal",
-		"--region", region)
+		"--repository-name", config.ECR.RepositoryName,
+		"--profile", config.AWS.Profile,
+		"--region", config.AWS.Region)
 
 	output, err := createECRCmd.CombinedOutput()
 	if err != nil {
@@ -121,8 +155,9 @@ func createECRRepository() error {
 	}
 	return nil
 }
+
 func getAWSAccountID() (string, error) {
-	cmd := exec.Command("aws", "sts", "get-caller-identity", "--query", "Account", "--output", "json", "--profile", awsProfile)
+	cmd := exec.Command("aws", "sts", "get-caller-identity", "--query", "Account", "--output", "json", "--profile", config.AWS.Profile)
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to get AWS Account ID: %v", err)
@@ -135,16 +170,17 @@ func getAWSAccountID() (string, error) {
 
 	return strings.Trim(accountID, "\""), nil
 }
+
 func createLambdaFunction(roleARN string, awsAccountID string) error {
-	imageUri := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s:latest", awsAccountID, region, ecrRepository)
+	imageUri := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s:latest", awsAccountID, config.AWS.Region, config.ECR.RepositoryName)
 
 	createLambdaCmd := exec.Command("aws", "lambda", "create-function",
-		"--function-name", functionName,
+		"--function-name", config.Lambda.FunctionName,
 		"--package-type", "Image",
 		"--code", fmt.Sprintf("ImageUri=%s", imageUri),
 		"--role", roleARN,
-		"--profile", awsProfile,
-		"--region", region)
+		"--profile", config.AWS.Profile,
+		"--region", config.AWS.Region)
 
 	output, err := createLambdaCmd.CombinedOutput()
 	if err != nil {
@@ -156,5 +192,45 @@ func createLambdaFunction(roleARN string, awsAccountID string) error {
 	}
 
 	fmt.Println("Lambda function created successfully")
+	return nil
+}
+
+func buildAndPushDockerImage(awsAccountID string) error {
+	// Log in to ECR
+	loginCmd := exec.Command("aws", "ecr", "get-login-password",
+		"--region", config.AWS.Region,
+		"--profile", config.AWS.Profile)
+	loginCmd.Stdout = os.Stdout
+	loginCmd.Stderr = os.Stderr
+	if err := loginCmd.Run(); err != nil {
+		return fmt.Errorf("failed to get ECR login: %v", err)
+	}
+
+	// Build Docker image
+	buildCmd := exec.Command("docker", "build", "-t", config.ECR.RepositoryName, ".")
+	buildCmd.Stdout = os.Stdout
+	buildCmd.Stderr = os.Stderr
+	if err := buildCmd.Run(); err != nil {
+		return fmt.Errorf("failed to build Docker image: %v", err)
+	}
+
+	// Tag Docker image
+	imageUri := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s:latest", awsAccountID, config.AWS.Region, config.ECR.RepositoryName)
+	tagCmd := exec.Command("docker", "tag", config.ECR.RepositoryName, imageUri)
+	tagCmd.Stdout = os.Stdout
+	tagCmd.Stderr = os.Stderr
+	if err := tagCmd.Run(); err != nil {
+		return fmt.Errorf("failed to tag Docker image: %v", err)
+	}
+
+	// Push Docker image to ECR
+	pushCmd := exec.Command("docker", "push", imageUri)
+	pushCmd.Stdout = os.Stdout
+	pushCmd.Stderr = os.Stderr
+	if err := pushCmd.Run(); err != nil {
+		return fmt.Errorf("failed to push Docker image to ECR: %v", err)
+	}
+
+	fmt.Println("Docker image built and pushed successfully")
 	return nil
 }
