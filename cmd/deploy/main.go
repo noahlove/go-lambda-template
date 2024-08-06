@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v2"
 )
@@ -18,6 +19,8 @@ type Config struct {
 	} `yaml:"aws"`
 	Lambda struct {
 		FunctionName string `yaml:"function_name"`
+		Timeout      int    `yaml:"timeout"`
+		MemorySize   int    `yaml:"memory_size"`
 	} `yaml:"lambda"`
 	ECR struct {
 		RepositoryName string `yaml:"repository_name"`
@@ -58,6 +61,10 @@ func main() {
 
 	if err := updateLambdaFunction(awsAccountID); err != nil {
 		log.Fatalf("Error updating Lambda function: %v", err)
+	}
+
+	if err := updateLambdaConfiguration(); err != nil {
+		log.Fatalf("Error updating Lambda configuration: %v", err)
 	}
 
 	fmt.Println("Deployment completed successfully")
@@ -172,4 +179,31 @@ func updateLambdaFunction(awsAccountID string) error {
 
 	fmt.Println("Lambda function code updated successfully")
 	return nil
+}
+
+func updateLambdaConfiguration() error {
+	maxRetries := 5
+	for i := 0; i < maxRetries; i++ {
+		updateConfigCmd := exec.Command("aws", "lambda", "update-function-configuration",
+			"--function-name", config.Lambda.FunctionName,
+			"--timeout", fmt.Sprintf("%d", config.Lambda.Timeout),
+			"--memory-size", fmt.Sprintf("%d", config.Lambda.MemorySize),
+			"--profile", config.AWS.Profile,
+			"--region", config.AWS.Region)
+
+		output, err := updateConfigCmd.CombinedOutput()
+		if err == nil {
+			fmt.Println("Lambda function configuration updated successfully")
+			return nil
+		}
+
+		if strings.Contains(string(output), "ResourceConflictException") {
+			fmt.Printf("Lambda function is still updating. Retrying in 10 seconds... (Attempt %d/%d)\n", i+1, maxRetries)
+			time.Sleep(10 * time.Second)
+		} else {
+			return fmt.Errorf("failed to update Lambda function configuration: %v\nOutput: %s", err, output)
+		}
+	}
+
+	return fmt.Errorf("failed to update Lambda function configuration after %d attempts", maxRetries)
 }

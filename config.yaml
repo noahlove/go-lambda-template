@@ -5,6 +5,8 @@ aws:
 lambda:
   function_name: hello-world-lambda
   role_name: lambda-execution-role
+  timeout: 30
+  memory_size: 256
 
 ecr:
   repository_name: hello-world-repo
